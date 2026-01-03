@@ -1,0 +1,99 @@
+version: "3.7"
+
+services:
+  # API Principal
+  rag-api:
+    image: aryarajalves/rag-produtos:1.0.0
+    hostname: "{{.Service.Name}}.{{.Task.Slot}}"
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+    networks:
+      - network_swarm_public
+    environment:
+      # URL do seu projeto Supabase (Banco de Dados + Vetores)
+      - SUPABASE_URL=${SUPABASE_URL}
+      # Chave de serviço (Service Role) do Supabase para ter permissão de escrita/leitura
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      # Chave da API do Google Gemini para Inteligência Artificial
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      # (Opcional) Senha para proteger sua API. Se definida, exige header X-API-Key
+      - API_KEY=${API_KEY}
+      # Quantos produtos retornar na busca (Padrão: 5)
+      - PRODUCTS_LIMIT=${PRODUCTS_LIMIT:-5}
+      # Máximo de requisições simultâneas para a IA (Evita erro 429)
+      - MAX_CONCURRENT_AI_REQUESTS=${MAX_CONCURRENT_AI_REQUESTS:-5}
+      # Tempo máximo (segundos) esperando na fila da IA antes de dar erro
+      - AI_QUEUE_TIMEOUT=${AI_QUEUE_TIMEOUT:-30}
+    deploy:
+      mode: replicated
+      replicas: 2 # 2 réplicas para balanceamento
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+      labels:
+        - traefik.enable=true
+        - traefik.http.routers.rag-api.rule=Host(`${DOMAIN:-api.seudominio.com}`)
+        - traefik.http.routers.rag-api.entrypoints=websecure
+        - traefik.http.routers.rag-api.priority=1
+        - traefik.http.routers.rag-api.tls.certresolver=letsencryptresolver
+        - traefik.http.routers.rag-api.service=rag-api
+        - traefik.http.services.rag-api.loadbalancer.server.port=8000
+        - traefik.http.services.rag-api.loadbalancer.passHostHeader=true
+        - traefik.http.services.rag-api.loadbalancer.sticky.cookie=true
+        # Health check
+        - traefik.http.services.rag-api.loadbalancer.healthcheck.path=/health
+        - traefik.http.services.rag-api.loadbalancer.healthcheck.interval=30s
+        - traefik.http.services.rag-api.loadbalancer.healthcheck.timeout=10s
+
+  # Worker de Embeddings
+  rag-worker:
+    image: aryarajalves/rag-produtos:1.0.0
+    hostname: "{{.Service.Name}}.{{.Task.Slot}}"
+    command: python -m app.workers.embeddings_worker
+    networks:
+      - network_swarm_public
+    environment:
+      # URL do seu projeto Supabase
+      - SUPABASE_URL=${SUPABASE_URL}
+      # Chave de serviço do Supabase
+      - SUPABASE_KEY=${SUPABASE_KEY}
+      # Chave do Gemini para gerar embeddings
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      # De quanto em quanto tempo (minutos) verificar novos produtos para gerar embeddings
+      - EMBEDDING_UPDATE_INTERVAL_MINUTES=${EMBEDDING_UPDATE_INTERVAL_MINUTES:-10}
+    deploy:
+      mode: replicated
+      replicas: 1 # Apenas 1 worker
+      placement:
+        constraints:
+          - node.role == manager
+      resources:
+        limits:
+          cpus: "0.25"
+          memory: 256M
+        reservations:
+          cpus: "0.1"
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+
+networks:
+  network_swarm_public:
+    name: network_swarm_public
+    external: true
